@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b5d43">
+<title>Transport RN1</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{--bg:#f3f1ea;--card:#fff;--tx:#14201a;--mut:#667068;--pri:#0b5d43;--ptx:#fff;--acc:#ffc928;--bd:#dcd9cd}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1511;--card:#16211b;--tx:#eef2ec;--mut:#9aa89f;--pri:#2fbf8f;--ptx:#04271b;--bd:#2a3a31}}
+html,body{height:100%;margin:0}*{box-sizing:border-box}
+body{background:var(--bg);color:var(--tx);font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding-top:env(safe-area-inset-top,0);padding-bottom:env(safe-area-inset-bottom,0)}
+.app{max-width:480px;height:100%;margin:0 auto;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--bd)}header b{flex:1}
+#map{height:34vh;min-height:170px;display:none}
+main{flex:1;overflow-y:auto;padding:14px}
+h2{margin:0 0 6px;font-size:20px}.mut{color:var(--mut);font-size:14px}.ok{color:var(--pri);font-weight:700}
+button,input{font:inherit}
+.tabs{display:flex;gap:8px;margin-bottom:12px}
+.tab{flex:1;min-height:46px;border:1.5px solid var(--bd);background:none;color:var(--tx);border-radius:12px;font-weight:600}
+.tab.on{background:var(--pri);color:var(--ptx);border-color:var(--pri)}
+.btn{width:100%;min-height:50px;border:0;border-radius:12px;background:var(--pri);color:var(--ptx);font-weight:700;margin-top:8px}
+.btn.alt{background:none;color:var(--tx);border:1.5px solid var(--bd)}
+.mini{min-height:40px;padding:0 14px;border:0;border-radius:10px;background:var(--pri);color:var(--ptx);font-weight:700}
+.opt{display:block;width:100%;text-align:left;min-height:52px;border:1.5px solid var(--bd);background:var(--card);color:var(--tx);border-radius:12px;margin:8px 0;padding:0 14px;font-weight:600}
+input{width:100%;min-height:48px;padding:0 12px;border:1.5px solid var(--bd);border-radius:12px;background:var(--card);color:var(--tx);margin:6px 0}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:12px;margin:10px 0;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.card .g{flex:1;min-width:120px}.p{font-weight:800;font-size:18px}
+.step{display:flex;align-items:center;justify-content:center;gap:14px;margin:10px 0}
+.step button{min-width:50px;height:50px;border-radius:25px;border:1.5px solid var(--bd);background:var(--card);color:var(--tx);font-size:22px}
+.step output{font-size:32px;font-weight:800;min-width:120px;text-align:center}
+.err{color:#b3261e;font-size:14px;min-height:20px}
+button:focus-visible,input:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+</style>
+</head>
+<body>
+<div class="app"><header><b id="ttl">Transport RN1</b><button class="mini" id="out" hidden>Quitter</button></header><div id="map"></div><main id="v"></main></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+/* ====== À MODIFIER : voir le guide de mise en ligne ====== */
+const CFG={URL:'https://oidhsnlcltfarpgpjfrf.supabase.co',KEY:'sb_publishable_co9NoHXdcAiAL5L4m1givQ_nJ6Udqb0',AUTH:'password'}; // AUTH : 'password' (e-mail + mot de passe), 'email' (code par e-mail) ou 'phone' (code SMS)
+/* ========================================================== */
+const $=s=>document.querySelector(s);
+const e=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let sb,U=null,P=null,DR=null,tab='moto',price=700,pos=null,step='id',ident='',err='',wid=null,lastW=0,rt=null,chan=null,eco=false,recovery=false,forgot=false;
+try{eco=localStorage.getItem('rn1eco')==='1'}catch(_){}
+const D={drivers:[],rides:[],offers:[],trips:[],books:[],profiles:[],blocked:[],noshows:[]};
+const ago=t=>Date.now()-new Date(t).getTime();
+async function boot(){
+ if(CFG.URL.startsWith('COLLER')){$('#v').innerHTML='<h2>Configuration manquante</h2><p class="mut">Renseignez l\'URL et la clé Supabase dans index.html (voir le guide).</p>';return}
+ sb=supabase.createClient(CFG.URL,CFG.KEY);
+ const{data}=await sb.auth.getSession();U=data.session?.user||null;
+ sb.auth.onAuthStateChange((ev,s)=>{if(ev==='PASSWORD_RECOVERY')recovery=true;const n=s?.user||null;if((n&&n.id)!==(U&&U.id)){U=n;load()}else if(ev==='PASSWORD_RECOVERY')paint()});
+ load();
+}
+async function load(){
+ if(!U){P=null;DR=null;paint();return}
+ const{data:p}=await sb.from('profiles').select('*').eq('id',U.id).maybeSingle();P=p;
+ if(P&&P.role==='driver'){const{data:d}=await sb.from('drivers').select('*').eq('id',U.id).maybeSingle();DR=d}
+ if(P&&!chan){chan=sb.channel('rn1').on('postgres_changes',{event:'*',schema:'public'},()=>{clearTimeout(rt);rt=setTimeout(refresh,400)}).subscribe()}
+ if(P&&P.role==='passenger')locate();
+ await refresh();
+}
+async function refresh(){
+ if(!P)return;
+ const q=n=>sb.from(n).select('*').order('id',{ascending:false}).limit(200);
+ const adm=P.role==='admin';const[dr,ri,of,tr,bk,bl,pr,ns]=await Promise.all([sb.from('drivers').select('*').limit(200),q('rides'),q('offers'),q('trips'),q('seat_bookings'),sb.from('blocked_users').select('*').limit(200),adm?sb.from('profiles').select('*').limit(200):{data:[]},adm?sb.from('no_shows').select('*').limit(500):{data:[]}]);
+ D.drivers=dr.data||[];D.rides=ri.data||[];D.offers=of.data||[];D.trips=tr.data||[];D.books=bk.data||[];D.blocked=bl.data||[];D.profiles=pr.data||[];D.noshows=ns.data||[];
+ if(DR)DR=D.drivers.find(d=>d.id===U.id)||DR;
+ paint();drawMap();
+}
+function locate(){if(!navigator.geolocation)return;navigator.geolocation.getCurrentPosition(p=>{pos={lat:p.coords.latitude,lng:p.coords.longitude};drawMap()},()=>{})}
+let M=null,LG=null;
+function drawMap(){
+ const el=$('#map');const show=P&&P.role==='passenger'&&!eco;el.style.display=show?'block':'none';if(!show)return;
+ if(!M){M=L_init()}
+ LG.clearLayers();
+ const c=tab==='moto'?'moto':'taxi';
+ D.drivers.filter(d=>d.verified&&d.online&&d.vehicle_type===c&&d.lat!=null&&ago(d.position_updated_at)<120000).forEach(d=>
+  window.L.circleMarker([d.lat,d.lng],{radius:9,color:'#2b2200',weight:2,fillColor:'#ffc928',fillOpacity:1}).bindTooltip(e(d.name)).addTo(LG));
+ if(pos){window.L.circleMarker([pos.lat,pos.lng],{radius:8,color:'#fff',weight:3,fillColor:'#1a73e8',fillOpacity:1}).addTo(LG);if(!M._c){M.setView([pos.lat,pos.lng],14);M._c=1}}
+}
+function L_init(){const m=window.L.map('map',{zoomControl:true}).setView([6.2,1.2],12);
+ window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(m);LG=window.L.layerGroup().addTo(m);return m}
+function nb(){return D.drivers.filter(d=>d.verified&&d.online&&d.vehicle_type===(tab==='moto'?'moto':'taxi')&&ago(d.position_updated_at)<120000).length}
+function paint(){
+ if(document.activeElement&&document.activeElement.tagName==='INPUT')return;
+ const v=$('#v');$('#out').hidden=!U;
+ if(!(U&&P&&P.role==='passenger')||eco)$('#map').style.display='none';
+ if(!U||!P)$('#ttl').textContent='Transport RN1';
+ if(recovery&&U){v.innerHTML=`<h2>Nouveau mot de passe</h2><input id="np" type="password" placeholder="Nouveau mot de passe (6 caractères minimum)" autocomplete="new-password"><div class="err">${e(err)}</div><button class="btn" data-a="newpw">Enregistrer</button>`;return}
+ if(!U){
+  if(forgot){v.innerHTML=`<h2>Mot de passe oublié</h2><p class="mut">Entrez votre e-mail, nous vous envoyons un lien.</p><input id="fe" type="email" placeholder="nom@exemple.com"><div class="${err.startsWith('Si ce')?'ok':'err'}">${e(err)}</div><button class="btn" data-a="sendreset">Envoyer le lien</button><button class="btn alt" data-a="backlogin">Retour</button>`;return}
+  if(CFG.AUTH==='password'){v.innerHTML=`<h2>Connexion</h2><p class="mut">Entrez votre e-mail et un mot de passe (6 caractères minimum).</p><input id="em" type="email" placeholder="nom@exemple.com" autocomplete="email"><input id="pw" type="password" placeholder="Mot de passe" autocomplete="current-password"><div class="err">${e(err)}</div><button class="btn" data-a="signin">Se connecter</button><button class="btn alt" data-a="signup">Créer un compte</button><button class="btn alt" data-a="forgot">Mot de passe oublié ?</button>`;return}
+  const ph=CFG.AUTH==='phone';
+  v.innerHTML=step==='id'?`<h2>Connexion</h2><p class="mut">${ph?'Entrez votre numéro, vous recevrez un code par SMS.':'Entrez votre e-mail, vous recevrez un code.'}</p><input id="idt" type="${ph?'tel':'email'}" placeholder="${ph?'90 00 00 00':'nom@exemple.com'}" autocomplete="${ph?'tel':'email'}"><div class="err">${e(err)}</div><button class="btn" data-a="send">Recevoir le code</button>`
+  :`<h2>Code de vérification</h2><p class="mut">Code envoyé à ${e(ident)}</p><input id="code" inputmode="numeric" placeholder="Code" autocomplete="one-time-code"><div class="err">${e(err)}</div><button class="btn" data-a="verify">Valider</button><button class="btn alt" data-a="back">Changer de numéro</button>`;return}
+ if(!P){v.innerHTML=`<h2>Bienvenue</h2><p class="mut">Votre prénom et votre profil :</p><input id="nm" placeholder="Prénom" maxlength="30"><input id="pl" placeholder="Plaque (chauffeurs seulement)" maxlength="15"><input id="vd" placeholder="Véhicule : couleur et modèle (chauffeurs)" maxlength="40"><div class="err">${e(err)}</div><button class="opt" data-a="role" data-r="passenger">🧍 Passager</button><button class="opt" data-a="role" data-r="moto">🛵 Chauffeur moto</button><button class="opt" data-a="role" data-r="taxi">🚕 Chauffeur taxi collectif</button>`;return}
+ if(P.role!=='admin'&&D.blocked.some(b=>b.user_id===U.id)){v.innerHTML='<h2>Compte suspendu</h2><p class="mut">Votre compte est suspendu. Contactez l\'administrateur.</p>';return}
+ $('#ttl').textContent='Transport RN1 · '+P.full_name;
+ v.innerHTML=P.role==='admin'?admin():P.role==='passenger'?passenger():driver();
+}
+function admin(){const w=D.drivers.filter(d=>!d.verified);
+ const ns=id=>D.noshows.filter(n=>n.passenger_id===id).length;
+ const us=D.profiles.filter(p=>p.id!==U.id&&p.role!=='admin');
+ return '<h2>Chauffeurs à valider</h2>'+(w.length?w.map(d=>`<div class="card"><div class="g"><b>${e(d.name)}</b><br><span class="mut">${d.vehicle_type==='moto'?'Moto':'Taxi'} · ${e(d.vehicle_desc||'')} · ${e(d.plate||'plaque ?')}</span></div><button class="mini" data-a="valid" data-id="${e(d.id)}">Valider</button></div>`).join(''):'<p class="mut">Aucun chauffeur en attente.</p>')
+ +'<h2 style="margin-top:18px">Utilisateurs</h2>'+(us.length?us.map(p=>{const b=D.blocked.some(x=>x.user_id===p.id);return `<div class="card"><div class="g"><b>${e(p.full_name)}</b><br><span class="mut">${p.role==='driver'?'Chauffeur':'Passager'} · ${ns(p.id)} absence(s)${b?' · 🚫 suspendu':''}</span></div><button class="mini" data-a="${b?'unblock':'block'}" data-id="${e(p.id)}">${b?'Réactiver':'Suspendre'}</button></div>`}).join(''):'<p class="mut">Aucun utilisateur.</p>')}
+function ecoList(){if(!eco)return '';const c=tab==='moto'?'moto':'taxi';
+ return D.drivers.filter(d=>d.verified&&d.online&&d.vehicle_type===c&&ago(d.position_updated_at)<120000).map(d=>`<div class="card"><div class="g"><b>${e(d.name)}</b><br><span class="mut">${e(d.vehicle_desc||'')} ${e(d.plate||'')}</span></div></div>`).join('')}
+function passenger(){
+ let h=`<div class="tabs"><button class="tab ${tab==='moto'?'on':''}" data-a="tab" data-t="moto">🛵 Moto</button><button class="tab ${tab==='taxi'?'on':''}" data-a="tab" data-t="taxi">🚕 Taxi collectif</button></div><p class="mut">${nb()} ${tab==='moto'?'moto(s)':'taxi(s)'} en ligne près de la RN1</p><button class="btn alt" data-a="eco" style="min-height:40px;margin:0 0 8px">${eco?'📶 Économie de données : activée':'📶 Économie de données : désactivée'}</button>`+ecoList();
+ if(tab==='moto'){
+  const r=D.rides.filter(x=>x.passenger_id===U.id&&['searching','accepted'].includes(x.status))[0];
+  const f=D.rides.filter(x=>x.passenger_id===U.id&&x.status==='done'&&!x.rating)[0];
+  if(r&&r.status==='searching'){const of=D.offers.filter(o=>o.ride_id===r.id);
+   h+=`<h2>Votre demande</h2><p class="mut">→ ${e(r.dest_label)} · votre offre ${r.proposed_price} F</p>`+(of.length?of.map(o=>`<div class="card"><div class="g"><b>${e(o.driver_name)}</b><br><span class="mut">${e(o.vehicle_desc||'')} ${e(o.plate||'')}</span></div><div class="p">${o.price} F</div><button class="mini" data-a="accept" data-id="${e(o.id)}">Accepter</button></div>`).join(''):'<p class="mut">En attente des offres des motos proches…</p>')+`<button class="btn alt" data-a="cancel" data-id="${e(r.id)}">Annuler</button>`}
+  else if(r)h+=`<h2>Moto en route</h2><div class="card"><div class="g"><b>${e(r.driver_name)}</b><br><span class="mut">${e(r.driver_vehicle||'')} ${e(r.driver_plate||'')}<br>→ ${e(r.dest_label)}</span></div><div class="p">${r.final_price} F</div></div><p class="mut">Paiement en espèces au conducteur.</p><button class="btn" data-a="done" data-id="${e(r.id)}">Course terminée</button>`;
+  else if(f)h+=`<h2>Notez votre trajet</h2><div class="step">${[1,2,3,4,5].map(i=>`<button data-a="rate" data-id="${e(f.id)}" data-n="${i}" aria-label="${i} étoiles">${i}★</button>`).join('')}</div>`;
+  else h+=`<h2>Demander une moto</h2><input id="dest" placeholder="Destination (ex. Lomé – Agoè)" maxlength="60"><div class="step"><button data-a="m" aria-label="Moins">−</button><output>${price} F</output><button data-a="p" aria-label="Plus">+</button></div><button class="btn" data-a="ask">Proposer mon prix</button>`;
+ }else{
+  if(D.books.length)h+='<h2>Mes places</h2>'+D.books.filter(b=>b.passenger_id===U.id).slice(0,3).map(b=>`<div class="card"><div class="g"><b>${e(b.depart_label)}</b> · ${e(b.driver_name)}<br><span class="mut">${e(b.vehicle_desc||'')} ${e(b.plate||'')}<br>Code à donner : <b>${e(b.code)}</b></span></div></div>`).join('');
+  const ts=D.trips.filter(t=>t.status==='open'&&t.seats_free>0);
+  h+='<h2>Départs vers Lomé</h2>'+(ts.length?ts.map(t=>`<div class="card"><div class="g"><b>${e(t.depart_label)}</b> · ${e(t.driver_name)}<br><span class="mut">${e(t.vehicle_desc||'')} ${e(t.plate||'')}<br>${t.seats_free} place(s) libre(s)</span></div><div class="p">${t.price_per_seat} F</div><button class="mini" data-a="book" data-id="${e(t.id)}">Réserver</button></div>`).join(''):'<p class="mut">Aucun départ publié pour le moment.</p>');
+ }
+ return h+`<div class="err">${e(err)}</div>`;
+}
+function driver(){
+ if(!DR)return '<p class="mut">Chargement…</p>';
+ if(!DR.verified)return '<h2>Compte en attente</h2><p class="mut">Votre compte chauffeur est en cours de validation. Vous pourrez recevoir des demandes dès qu\'il sera validé.</p>';
+ let h=`<button class="btn ${DR.online?'':'alt'}" data-a="online">${DR.online?'🟢 En ligne – passer hors ligne':'⚪ Hors ligne – passer en ligne'}</button>`;
+ if(DR.vehicle_type==='moto'){
+  h+=D.rides.filter(r=>r.driver_id===U.id&&r.status==='accepted').map(r=>`<h2>Course en cours</h2><div class="card"><div class="g"><b>${e(r.passenger_name)}</b><br><span class="mut">→ ${e(r.dest_label)}</span></div><div class="p">${r.final_price} F</div><button class="mini" data-a="noshow" data-id="${e(r.id)}">Passager absent</button></div>`).join('');
+  const open=D.rides.filter(r=>r.status==='searching'&&!D.offers.some(o=>o.ride_id===r.id&&o.driver_id===U.id));
+  h+='<h2>Demandes ouvertes</h2>'+(DR.online?(open.length?open.map(r=>`<div class="card"><div class="g"><b>${e(r.passenger_name)}</b> → ${e(r.dest_label)}</div><div class="p">${r.proposed_price} F</div><input type="number" id="o${e(r.id)}" value="${r.proposed_price}" step="50" min="100"><button class="mini" data-a="offer" data-id="${e(r.id)}">Envoyer mon offre</button></div>`).join(''):'<p class="mut">Aucune demande pour le moment.</p>'):'<p class="mut">Passez en ligne pour voir les demandes.</p>');
+ }else{
+  h+=`<h2>Publier un départ</h2><input id="tm" placeholder="Heure (ex. 6h30)" maxlength="10"><input id="ts" type="number" placeholder="Places libres" min="1" max="8"><input id="tp" type="number" placeholder="Prix par place (F)" min="100" step="50"><button class="btn" data-a="trip">Publier</button>`;
+  const mt=D.trips.filter(t=>t.driver_id===U.id&&t.status!=='left');
+  h+='<h2>Mes départs</h2>'+(mt.length?mt.map(t=>`<div class="card"><div class="g"><b>${e(t.depart_label)}</b> · ${t.seats_free} place(s) libre(s)<br><span class="mut">${D.books.filter(b=>b.trip_id===t.id).map(b=>e(b.passenger_name)+' ('+e(b.code)+')').join(', ')||'Aucune réservation'}</span></div><button class="mini" data-a="left" data-id="${e(t.id)}">Parti</button></div>`).join(''):'<p class="mut">Aucun départ publié.</p>');
+ }
+ return h+`<div class="err">${e(err)}</div>`;
+}
+function track(on){
+ if(!navigator.geolocation)return;
+ if(!on){if(wid!=null)navigator.geolocation.clearWatch(wid);wid=null;return}
+ if(wid!=null)return;
+ wid=navigator.geolocation.watchPosition(p=>{if(Date.now()-lastW<15000)return;lastW=Date.now();
+  sb.from('drivers').update({lat:p.coords.latitude,lng:p.coords.longitude,position_updated_at:new Date().toISOString()}).eq('id',U.id).then(()=>{})},()=>{},{enableHighAccuracy:true});
+}
+const ok=async(p)=>{const{error}=await p;err=error?'Action impossible, réessayez.':'';await refresh();return !error};
+const A={
+ eco(){eco=!eco;try{localStorage.setItem('rn1eco',eco?'1':'0')}catch(_){}paint();drawMap()},
+ forgot(){forgot=true;err='';paint()},backlogin(){forgot=false;err='';paint()},
+ async sendreset(){const em=($('#fe').value||'').trim();if(!em)return;
+  const{error}=await sb.auth.resetPasswordForEmail(em,{redirectTo:location.origin+location.pathname});
+  err=error?'Envoi impossible, réessayez plus tard.':'Si ce compte existe, un e-mail avec un lien a été envoyé.';paint()},
+ async newpw(){const p=$('#np').value||'';if(p.length<6){err='6 caractères minimum.';paint();return}
+  const{error}=await sb.auth.updateUser({password:p});
+  if(error){err='Impossible de changer le mot de passe.';paint()}else{recovery=false;err='';try{history.replaceState(null,'',location.pathname)}catch(_){}paint()}},
+ async noshow(t){const{error}=await sb.rpc('report_no_show',{p_ride:+t.dataset.id});err=error?'Action impossible.':'';await refresh()},
+ block(t){return ok(sb.from('blocked_users').insert({user_id:t.dataset.id}))},
+ unblock(t){return ok(sb.from('blocked_users').delete().eq('user_id',t.dataset.id))},
+ async signin(){const em=($('#em').value||'').trim(),pw=$('#pw').value||'';if(!em||!pw)return;
+  const{error}=await sb.auth.signInWithPassword({email:em,password:pw});err=error?'E-mail ou mot de passe incorrect.':'';if(error)paint()},
+ async signup(){const em=($('#em').value||'').trim(),pw=$('#pw').value||'';if(!em||pw.length<6){err='E-mail et mot de passe de 6 caractères minimum.';paint();return}
+  const{data,error}=await sb.auth.signUp({email:em,password:pw});
+  if(error){err='Création impossible : '+error.message;paint()}else if(!data.session){err='Compte créé. Vérifiez votre e-mail pour confirmer, puis connectez-vous.';paint()}else err=''},
+ async send(){const raw=($('#idt').value||'').trim();if(!raw)return;
+  let id=raw;if(CFG.AUTH==='phone'){const d=raw.replace(/[^\d+]/g,'');id=d.startsWith('+')?d:'+228'+d.replace(/^0+/,'')}
+  const{error}=await sb.auth.signInWithOtp(CFG.AUTH==='phone'?{phone:id}:{email:id});
+  if(error){err='Envoi impossible : '+error.message}else{ident=id;step='code';err=''}paint()},
+ async verify(){const t=($('#code').value||'').trim();if(!t)return;
+  const{error}=await sb.auth.verifyOtp(CFG.AUTH==='phone'?{phone:ident,token:t,type:'sms'}:{email:ident,token:t,type:'email'});
+  if(error){err='Code incorrect ou expiré.';paint()}else{err='';step='id'}},
+ back(){step='id';err='';paint()},
+ async role(t){const n=($('#nm').value||'').trim();if(!n){$('#nm').focus();return}
+  const r=t.dataset.r,drv=r!=='passenger',pl=($('#pl').value||'').trim(),vd=($('#vd').value||'').trim();
+  if(drv&&(!pl||!vd)){err='Entrez votre plaque et la description du véhicule.';paint();return}
+  const a=await sb.from('profiles').insert({id:U.id,role:drv?'driver':'passenger',full_name:n,phone:U.phone||U.email||null});
+  if(a.error){err='Création impossible.';paint();return}
+  if(drv)await sb.from('drivers').insert({id:U.id,name:n,vehicle_type:r,plate:pl,vehicle_desc:vd});
+  err='';await load()},
+ tab(t){tab=t.dataset.t;paint();drawMap()},m(){price=Math.max(300,price-50);paint()},p(){price+=50;paint()},
+ async ask(){const d=($('#dest').value||'').trim();if(!d){$('#dest').focus();return}
+  const{error}=await sb.from('rides').insert({passenger_id:U.id,passenger_name:P.full_name,dest_label:d,proposed_price:price,origin_lat:pos&&pos.lat,origin_lng:pos&&pos.lng});err=error?(error.code==='23505'?'Vous avez déjà une demande en cours.':'Demande impossible (compte suspendu ?).'):'';await refresh()},
+ async accept(t){const o=D.offers.find(x=>String(x.id)===t.dataset.id);if(!o)return;
+  await ok(sb.from('rides').update({status:'accepted',driver_id:o.driver_id,driver_name:o.driver_name,final_price:o.price,driver_vehicle:o.vehicle_desc,driver_plate:o.plate}).eq('id',o.ride_id).eq('status','searching'))},
+ cancel(t){return ok(sb.from('rides').update({status:'cancelled'}).eq('id',t.dataset.id))},
+ done(t){return ok(sb.from('rides').update({status:'done'}).eq('id',t.dataset.id))},
+ rate(t){return ok(sb.from('rides').update({rating:+t.dataset.n}).eq('id',t.dataset.id))},
+ async book(t){const{error}=await sb.rpc('book_seat',{p_trip:+t.dataset.id,p_name:P.full_name});err=error?'Place indisponible.':'';await refresh()},
+ async online(){const on=!DR.online;await ok(sb.from('drivers').update({online:on,position_updated_at:new Date().toISOString()}).eq('id',U.id));track(on)},
+ async offer(t){const v=+$('#o'+t.dataset.id).value;if(!(v>=100))return;
+  await ok(sb.from('offers').insert({ride_id:+t.dataset.id,driver_id:U.id,driver_name:P.full_name,price:v,vehicle_desc:DR.vehicle_desc,plate:DR.plate}))},
+ async trip(){const tm=$('#tm').value.trim(),s=+$('#ts').value,p=+$('#tp').value;if(!tm||!(s>0)||!(p>0))return;
+  await ok(sb.from('trips').insert({driver_id:U.id,driver_name:P.full_name,origin_label:'Adétikopé',dest_label:'Lomé',depart_label:tm,seats_free:s,price_per_seat:p,vehicle_desc:DR.vehicle_desc,plate:DR.plate}))},
+ left(t){return ok(sb.from('trips').update({status:'left'}).eq('id',t.dataset.id))},
+ valid(t){return ok(sb.from('drivers').update({verified:true}).eq('id',t.dataset.id))}
+};
+document.addEventListener('click',ev=>{const t=ev.target.closest('button');if(!t)return;
+ if(t.id==='out'){track(false);sb.auth.signOut();return}
+ const f=A[t.dataset.a];if(f)Promise.resolve(f(t)).catch(()=>{err='Erreur réseau, réessayez.';paint()})});
+document.addEventListener('focusout',()=>setTimeout(paint,150));
+boot();
+</script>
+</body>
+</html>

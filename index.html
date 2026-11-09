@@ -59,7 +59,7 @@ async function boot(){
 async function load(){
  if(!U){P=null;DR=null;paint();return}
  const{data:p}=await sb.from('profiles').select('*').eq('id',U.id).maybeSingle();P=p;
- if(P&&P.role==='driver'){const{data:d}=await sb.from('drivers').select('*').eq('id',U.id).maybeSingle();DR=d}
+ if(P&&P.role==='driver'){const{data:d}=await sb.from('drivers').select('*').eq('id',U.id).maybeSingle();DR=d;if(DR&&DR.online)track(true)}
  if(P&&!chan){chan=sb.channel('rn1').on('postgres_changes',{event:'*',schema:'public'},()=>{clearTimeout(rt);rt=setTimeout(refresh,400)}).subscribe()}
  if(P&&P.role==='passenger')locate();
  await refresh();
@@ -73,23 +73,84 @@ async function refresh(){
  paint();drawMap();
 }
 function locate(){if(!navigator.geolocation)return;navigator.geolocation.getCurrentPosition(p=>{pos={lat:p.coords.latitude,lng:p.coords.longitude};drawMap()},()=>{})}
-let M=null,LG=null;
+let M=null,LG=null,RG=null,RR=null,route=null,pickA=null,destText='',etaText='',dm=null,demoRaf=null,rrId=0;const rc={};
+function mapShow(){if(!P||eco)return false;if(P.role==='passenger')return true;return P.role==='driver'&&D.rides.some(x=>x.driver_id===U.id&&x.status==='accepted')}
 function drawMap(){
- const el=$('#map');const show=P&&P.role==='passenger'&&!eco;el.style.display=show?'block':'none';if(!show)return;
- if(!M){M=L_init()}
+ const el=$('#map'),show=mapShow();el.style.display=show?'block':'none';if(!show)return;
+ if(!M)M=L_init();M.invalidateSize();
  LG.clearLayers();
- const c=tab==='moto'?'moto':'taxi';
- D.drivers.filter(d=>d.verified&&d.online&&d.vehicle_type===c&&d.lat!=null&&ago(d.position_updated_at)<120000).forEach(d=>
-  window.L.circleMarker([d.lat,d.lng],{radius:9,color:'#2b2200',weight:2,fillColor:'#ffc928',fillOpacity:1}).bindTooltip(e(d.name)).addTo(LG));
+ if(P.role==='passenger'){const c=tab==='moto'?'moto':'taxi';
+  D.drivers.filter(d=>d.verified&&d.online&&d.vehicle_type===c&&d.lat!=null&&ago(d.position_updated_at)<120000).forEach(d=>
+   window.L.circleMarker([d.lat,d.lng],{radius:9,color:'#2b2200',weight:2,fillColor:'#ffc928',fillOpacity:1}).bindTooltip(e(d.name)).addTo(LG))}
  if(pos){window.L.circleMarker([pos.lat,pos.lng],{radius:8,color:'#fff',weight:3,fillColor:'#1a73e8',fillOpacity:1}).addTo(LG);if(!M._c){M.setView([pos.lat,pos.lng],14);M._c=1}}
+ if(P.role==='passenger')drawRoute(false);
+ rideLayers();
 }
 function L_init(){const m=window.L.map('map',{zoomControl:true}).setView([6.2,1.2],12);
- window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(m);LG=window.L.layerGroup().addTo(m);return m}
+ window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(m);
+ LG=window.L.layerGroup().addTo(m);RG=window.L.layerGroup().addTo(m);RR=window.L.layerGroup().addTo(m);m.on('click',onMapClick);return m}
+async function getRoute(a,b){try{const r=await fetch('https://router.project-osrm.org/route/v1/driving/'+a.lng+','+a.lat+';'+b.lng+','+b.lat+'?overview=full&geometries=geojson');const j=await r.json();const x=j.routes&&j.routes[0];if(!x)return null;return{pts:x.geometry.coordinates.map(c=>[c[1],c[0]]),dist:x.distance,dur:x.duration}}catch(_){return null}}
+const fmt=r=>(r.dist/1000).toFixed(1).replace('.',',')+' km · environ '+Math.max(1,Math.round(r.dur/60))+' min';
+function activeRide(){return D.rides.find(x=>x.passenger_id===U.id&&['searching','accepted'].includes(x.status))}
+async function onMapClick(ev){
+ if(!P||P.role!=='passenger'||tab!=='moto'||activeRide())return;
+ const p={lat:ev.latlng.lat,lng:ev.latlng.lng};
+ if(!pos&&!pickA){pickA=p;drawRoute(false);paint();return}
+ const A=pos||pickA;
+ route={A,B:p,pts:null,dist:0,dur:0};drawRoute(false);
+ const r=await getRoute(A,p);const d=km(A.lat,A.lng,p.lat,p.lng)*1000;
+ route=r?{A,B:p,...r}:{A,B:p,pts:[[A.lat,A.lng],[p.lat,p.lng]],dist:d,dur:d/8,approx:1};
+ if(!destText.trim())destText='Point choisi sur la carte';
+ drawRoute(true);paint();nameB(p);
+}
+async function nameB(p){try{const r=await fetch('https://nominatim.openstreetmap.org/reverse?format=jsonv2&accept-language=fr&lat='+p.lat+'&lon='+p.lng);const j=await r.json();const n=(j.display_name||'').split(',').slice(0,2).join(',').trim();
+ if(n&&route&&route.B===p&&destText==='Point choisi sur la carte'){destText=n.slice(0,60);paint()}}catch(_){}}
+function drawRoute(fit){
+ if(!M||!RG)return;RG.clearLayers();const L=window.L;
+ if(pickA&&!pos)L.circleMarker([pickA.lat,pickA.lng],{radius:8,color:'#fff',weight:3,fillColor:'#1a73e8',fillOpacity:1}).addTo(RG);
+ if(route){
+  if(route.pts)L.polyline(route.pts,{color:'#14181b',weight:5,opacity:.85}).addTo(RG);
+  L.circleMarker([route.B.lat,route.B.lng],{radius:9,color:'#ffc928',weight:3,fillColor:'#14181b',fillOpacity:1}).addTo(RG);
+  if(fit&&route.pts&&route.pts.length>1)M.fitBounds(L.polyline(route.pts).getBounds(),{padding:[30,30]});
+ }
+}
+async function rideLayers(){
+ if(!M||!RR)return;const id=++rrId;RR.clearLayers();const L=window.L,role=P&&P.role;
+ let r=null;
+ if(role==='passenger')r=D.rides.find(x=>x.passenger_id===U.id&&x.status==='accepted');
+ else if(role==='driver')r=D.rides.find(x=>x.driver_id===U.id&&x.status==='accepted');
+ if(!r){if(etaText){etaText='';}return}
+ const pk=r.origin_lat!=null?{lat:r.origin_lat,lng:r.origin_lng}:null,ds=r.dest_lat!=null?{lat:r.dest_lat,lng:r.dest_lng}:null;
+ if(pk)L.circleMarker([pk.lat,pk.lng],{radius:8,color:'#fff',weight:3,fillColor:'#1a73e8',fillOpacity:1}).addTo(RR);
+ if(ds){L.circleMarker([ds.lat,ds.lng],{radius:9,color:'#ffc928',weight:3,fillColor:'#14181b',fillOpacity:1}).addTo(RR);
+  if(pk){const k='t'+r.id;if(!rc[k]){rc[k]={};const rt=await getRoute(pk,ds);rc[k]=rt||{pts:[[pk.lat,pk.lng],[ds.lat,ds.lng]]};if(id!==rrId)return}
+   if(rc[k].pts)L.polyline(rc[k].pts,{color:'#14181b',weight:5,opacity:.8}).addTo(RR)}}
+ const d=D.drivers.find(x=>x.id===r.driver_id);
+ if(d&&d.lat!=null)L.circleMarker([d.lat,d.lng],{radius:12,color:'#14181b',weight:3,fillColor:'#ffc928',fillOpacity:1}).bindTooltip(e(r.driver_name||'')).addTo(RR);
+ if(role==='passenger'&&pk&&d&&d.lat!=null){
+  const k='e'+r.id,now=Date.now();
+  if(!rc[k]||now-(rc[k].t||0)>20000){rc[k]={t:now};const rt=await getRoute({lat:d.lat,lng:d.lng},pk);if(id!==rrId)return;rc[k]=Object.assign({t:now},rt||{})}
+  const rt=rc[k];
+  if(rt&&rt.pts){L.polyline(rt.pts,{color:'#1a73e8',weight:4,dashArray:'6 8'}).addTo(RR);
+   const txt=(r.driver_name||'Le chauffeur')+' arrive dans environ '+Math.max(1,Math.round(rt.dur/60))+' min ('+(rt.dist/1000).toFixed(1).replace('.',',')+' km)';
+   if(txt!==etaText){etaText=txt;paint()}}
+ }
+}
+function demo(){
+ if(!route||!route.pts||route.pts.length<2||!M)return;const L=window.L,pts=route.pts;
+ if(demoRaf)cancelAnimationFrame(demoRaf);if(dm){M.removeLayer(dm);dm=null}
+ const mk=dm=L.circleMarker(pts[0],{radius:11,color:'#14181b',weight:3,fillColor:'#ffc928',fillOpacity:1}).addTo(M);
+ const T=7000,t0=performance.now();
+ const step=now=>{const t=Math.min(1,(now-t0)/T),f=t*(pts.length-1),i=Math.min(pts.length-2,Math.floor(f)),q=f-i;
+  mk.setLatLng([pts[i][0]+(pts[i+1][0]-pts[i][0])*q,pts[i][1]+(pts[i+1][1]-pts[i][1])*q]);
+  if(t<1)demoRaf=requestAnimationFrame(step);else{demoRaf=null;setTimeout(()=>{if(dm===mk){M.removeLayer(mk);dm=null}},1500)}};
+ demoRaf=requestAnimationFrame(step);
+}
 function nb(){return D.drivers.filter(d=>d.verified&&d.online&&d.vehicle_type===(tab==='moto'?'moto':'taxi')&&ago(d.position_updated_at)<120000).length}
 function paint(){
  if(document.activeElement&&document.activeElement.tagName==='INPUT')return;
  const v=$('#v');$('#out').hidden=!U;
- if(!(U&&P&&P.role==='passenger')||eco)$('#map').style.display='none';
+ $('#map').style.display=(U&&mapShow())?'block':'none';
  if(!U||!P)$('#ttl').textContent='Yaplas';
  if(recovery&&U){v.innerHTML=`<h2>Nouveau mot de passe</h2><input id="np" type="password" placeholder="Nouveau mot de passe (6 caractères minimum)" autocomplete="new-password"><div class="err">${e(err)}</div><button class="btn" data-a="newpw">Enregistrer</button>`;return}
  if(!U){
@@ -117,9 +178,9 @@ function passenger(){
   const f=D.rides.filter(x=>x.passenger_id===U.id&&x.status==='done'&&!x.rating)[0];
   if(r&&r.status==='searching'){const of=D.offers.filter(o=>o.ride_id===r.id);
    h+=`<h2>Votre demande</h2><p class="mut">→ ${e(r.dest_label)} · votre offre ${r.proposed_price} F</p>`+(of.length?of.map(o=>`<div class="card"><div class="g"><b>${e(o.driver_name)}</b><br><span class="mut">${e(o.vehicle_desc||'')} ${e(o.plate||'')}</span></div><div class="p">${o.price} F</div><button class="mini" data-a="accept" data-id="${e(o.id)}">Accepter</button></div>`).join(''):'<p class="mut">En attente des offres des motos proches…</p>')+`<button class="btn alt" data-a="cancel" data-id="${e(r.id)}">Annuler</button>`}
-  else if(r)h+=`<h2>Moto en route</h2><div class="card"><div class="g"><b>${e(r.driver_name)}</b><br><span class="mut">${e(r.driver_vehicle||'')} ${e(r.driver_plate||'')}<br>→ ${e(r.dest_label)}</span></div><div class="p">${r.final_price} F</div></div><p class="mut">Paiement en espèces au conducteur.</p><button class="btn" data-a="done" data-id="${e(r.id)}">Course terminée</button>`;
+  else if(r)h+=`<h2>Moto en route</h2><div class="card"><div class="g"><b>${e(r.driver_name)}</b><br><span class="mut">${e(r.driver_vehicle||'')} ${e(r.driver_plate||'')}<br>→ ${e(r.dest_label)}</span></div><div class="p">${r.final_price} F</div></div>${etaText?`<p class="ok">${e(etaText)}</p>`:''}<p class="mut">Paiement en espèces au conducteur.</p><button class="btn" data-a="done" data-id="${e(r.id)}">Course terminée</button>`;
   else if(f)h+=`<h2>Notez votre trajet</h2><div class="step">${[1,2,3,4,5].map(i=>`<button data-a="rate" data-id="${e(f.id)}" data-n="${i}" aria-label="${i} étoiles">${i}★</button>`).join('')}</div>`;
-  else h+=`<h2>Demander une moto</h2><input id="dest" placeholder="Destination (ex. Lomé – Agoè)" maxlength="60"><div class="step"><button data-a="m" aria-label="Moins">−</button><output>${price} F</output><button data-a="p" aria-label="Plus">+</button></div><button class="btn" data-a="ask">Proposer mon prix</button>`;
+  else h+=`<h2>Demander une moto</h2>${eco?'':`<p class="mut">${route?'':((pos||pickA)?'Appuyez sur la carte pour placer votre arrivée.':'Appuyez sur la carte pour placer votre départ.')}</p>`}${route&&route.pts?`<p class="ok">📍 ${fmt(route)}${route.approx?' (estimation)':''}</p><button class="btn alt" data-a="demo" style="margin:0 0 8px">▶ Voir le trajet</button>`:''}<input id="dest" value="${e(destText)}" placeholder="Destination (ex. Lomé – Agoè)" maxlength="60"><div class="step"><button data-a="m" aria-label="Moins">−</button><output>${price} F</output><button data-a="p" aria-label="Plus">+</button></div><button class="btn" data-a="ask">Proposer mon prix</button>`;
  }else{
   if(D.books.length)h+='<h2>Mes places</h2>'+D.books.filter(b=>b.passenger_id===U.id).slice(0,3).map(b=>`<div class="card"><div class="g"><b>${e(b.depart_label)}</b> · ${e(b.driver_name)}<br><span class="mut">${e(b.vehicle_desc||'')} ${e(b.plate||'')}<br>Code à donner : <b>${e(b.code)}</b></span></div></div>`).join('');
   const ts=D.trips.filter(t=>t.status==='open'&&t.seats_free>0);
@@ -146,7 +207,7 @@ function track(on){
  if(!navigator.geolocation)return;
  if(!on){if(wid!=null)navigator.geolocation.clearWatch(wid);wid=null;return}
  if(wid!=null)return;
- wid=navigator.geolocation.watchPosition(p=>{if(Date.now()-lastW<15000)return;lastW=Date.now();
+ wid=navigator.geolocation.watchPosition(p=>{pos={lat:p.coords.latitude,lng:p.coords.longitude};if(Date.now()-lastW<15000)return;lastW=Date.now();drawMap();
   sb.from('drivers').update({lat:p.coords.latitude,lng:p.coords.longitude,position_updated_at:new Date().toISOString()}).eq('id',U.id).then(()=>{})},()=>{},{enableHighAccuracy:true});
 }
 const ok=async(p)=>{const{error}=await p;err=error?'Action impossible, réessayez.':'';await refresh();return !error};
@@ -182,9 +243,13 @@ const A={
   if(a.error){err='Création impossible.';paint();return}
   if(drv)await sb.from('drivers').insert({id:U.id,name:n,vehicle_type:r,plate:pl,vehicle_desc:vd});
   err='';await load()},
- tab(t){tab=t.dataset.t;paint();drawMap()},m(){price=Math.max(300,price-50);paint()},p(){price+=50;paint()},
+ tab(t){tab=t.dataset.t;route=null;pickA=null;destText='';if(RG)RG.clearLayers();paint();drawMap()},m(){price=Math.max(300,price-50);paint()},p(){price+=50;paint()},
  async ask(){const d=($('#dest').value||'').trim();if(!d){$('#dest').focus();return}
-  const{error}=await sb.from('rides').insert({passenger_id:U.id,passenger_name:P.full_name,dest_label:d,proposed_price:price,origin_lat:pos&&pos.lat,origin_lng:pos&&pos.lng});err=error?(error.code==='23505'?'Vous avez déjà une demande en cours.':'Demande impossible (compte suspendu ?).'):'';await refresh()},
+  const A=pos||pickA;
+  const{error}=await sb.from('rides').insert({passenger_id:U.id,passenger_name:P.full_name,dest_label:d,proposed_price:price,origin_lat:A&&A.lat,origin_lng:A&&A.lng,dest_lat:route&&route.B.lat,dest_lng:route&&route.B.lng});
+  err=error?(error.code==='23505'?'Vous avez déjà une demande en cours.':'Demande impossible (compte suspendu ?).'):'';
+  if(!error){route=null;pickA=null;destText='';if(RG)RG.clearLayers()}await refresh()},
+ demo(){demo()},
  async accept(t){const o=D.offers.find(x=>String(x.id)===t.dataset.id);if(!o)return;
   await ok(sb.from('rides').update({status:'accepted',driver_id:o.driver_id,driver_name:o.driver_name,final_price:o.price,driver_vehicle:o.vehicle_desc,driver_plate:o.plate}).eq('id',o.ride_id).eq('status','searching'))},
  cancel(t){return ok(sb.from('rides').update({status:'cancelled'}).eq('id',t.dataset.id))},
@@ -202,6 +267,7 @@ const A={
 document.addEventListener('click',ev=>{const t=ev.target.closest('button');if(!t)return;
  if(t.id==='out'){track(false);sb.auth.signOut();return}
  const f=A[t.dataset.a];if(f)Promise.resolve(f(t)).catch(()=>{err='Erreur réseau, réessayez.';paint()})});
+document.addEventListener('input',ev=>{if(ev.target.id==='dest')destText=ev.target.value});
 document.addEventListener('focusout',()=>setTimeout(paint,150));
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 boot();
